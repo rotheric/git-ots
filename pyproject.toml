@@ -1,0 +1,110 @@
+[project]
+name = "git-ots"
+dynamic = ["version"]
+description = "Anchor Git commit history in Bitcoin using OpenTimestamps."
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Markus Rother", email = "markus@rotheric.com" },
+]
+keywords = ["git", "opentimestamps", "bitcoin", "timestamping", "provenance"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/rotheric/git-ots"
+Repository = "https://github.com/rotheric/git-ots"
+Issues = "https://github.com/rotheric/git-ots/issues"
+Changelog = "https://github.com/rotheric/git-ots/blob/master/CHANGELOG.md"
+
+[project.scripts]
+git-ots = "git_ots.cli:main"
+
+# uv keys a local package's cached build on a set of files. Older versions
+# default to pyproject.toml alone, which can remain unchanged across source
+# edits -- so a cached wheel can be reused
+# and a reinstall silently installs stale code. Listing the sources makes any
+# edit invalidate the build for every uv command (build, sync, run, tool
+# install), not just the make targets.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "src/**/*.py" },
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/git_ots/__init__.py"
+
+[dependency-groups]
+dev = [
+    "mutmut>=3.7.0",
+    "pytest",
+    "ruff>=0.16.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: requires network access and the real OpenTimestamps CLI",
+]
+
+# Mutation-testing configuration. `only_mutate` scopes each run to the modules
+# under audit; the full test suite stays in the selection so kills are counted
+# against every test that covers the module, not just its own test file.
+[tool.mutmut]
+source_paths = ["src/git_ots"]
+# These tests spawn real subprocesses and wait a few seconds for them to reach
+# a marker; under mutmut's instrumented, parallel runs those budgets are not
+# met, so they are deselected rather than left as a flaky mutation baseline.
+# Consequence: survivors in the subprocess/lock cleanup paths may be
+# overcounted -- verify those against these tests before calling them gaps.
+pytest_add_cli_args_test_selection = [
+    "tests/",
+    "--deselect",
+    "tests/test_integration.py::test_concurrent_run_allows_only_one_submission",
+    "--deselect",
+    "tests/test_integration.py::test_submit_kills_background_child_of_a_forking_ots_script",
+    "--deselect",
+    "tests/test_integration.py::test_submit_kills_background_child_even_when_caller_exits_immediately",
+    "--deselect",
+    "tests/test_integration.py::test_sigint_during_run_kills_background_child_of_a_forking_ots_script",
+    "--deselect",
+    "tests/test_integration.py::test_run_orchestration_direct_call_respects_advisory_lock",
+]
+also_copy = [
+    "README.md",
+    "Makefile",
+    "LICENSE",
+    "specs",
+    "docs",
+    ".github",
+]
+# Scope of the current mutation pass. Narrow this to the modules under audit
+# before a run: this box has one core, so a full sweep of the list below is a
+# multi-hour job (~5000 mutants at roughly one per second).
+only_mutate = [
+    "src/git_ots/config.py",
+    "src/git_ots/timestamp.py",
+    "src/git_ots/git.py",
+    "src/git_ots/cli.py",
+    "src/git_ots/orchestration.py",
+    "src/git_ots/upgrade.py",
+]

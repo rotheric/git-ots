@@ -1,0 +1,56 @@
+# .gitignore for git-ots
+#
+# Note what is deliberately NOT ignored: `.opentimestamps/` holds the tool's
+# own proofs and manifests for this repository. Those are the product and are
+# committed. Never add them here.
+#
+# Comments must be on their own line -- git has no inline comments, so any
+# trailing text becomes part of the pattern.
+
+# --- Python bytecode and caches -------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Build artifacts -------------------------------------------------------
+# `make build` writes wheels and sdists here.
+/dist/
+/build/
+*.egg-info/
+
+# --- Virtual environments --------------------------------------------------
+# `uv sync` creates .venv. uv.lock is committed, so environments stay
+# reproducible without tracking the environment itself.
+.venv/
+venv/
+
+# --- Tool caches -----------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Agent and editor tooling ----------------------------------------------
+# Personal development tooling, not part of the project.
+
+# Sandbox descriptor.
+.clauded.yaml
+
+# opencode model configuration.
+opencode.json
+
+# MCP server definitions, which commonly hold machine-local paths.
+.mcp.json
+
+# Claude Code local overrides. A shared .claude/settings.json stays tracked.
+.claude/settings.local.json
+.claude/verification-results.jsonl
+
+# --- Editor and OS noise ---------------------------------------------------
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+mutants/
