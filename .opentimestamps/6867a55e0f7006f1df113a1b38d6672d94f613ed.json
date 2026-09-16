@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "source_commit": "6867a55e0f7006f1df113a1b38d6672d94f613ed",
+  "git_object_format": "sha1",
+  "payload_format": "git-commit-id-v1",
+  "submitted_at": "2026-09-16T08:55:42Z",
+  "proof": "6867a55e0f7006f1df113a1b38d6672d94f613ed.ots",
+  "source_ref": "refs/heads/master",
+  "triggers": [
+    "every_commit"
+  ]
+}
