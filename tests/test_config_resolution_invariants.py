@@ -613,7 +613,7 @@ def test_ac_inv_3_non_trigger_key_independent_of_trigger_ladder(
 # AC-INV-4 -- G4, read boundedness is a schema property.
 # ---------------------------------------------------------------------------
 
-# Valid values for every one of the 15 `ots.*` keys, all set in `local`
+# Valid values for every one of the `ots.*` keys, all set in `local`
 # scope. `ots.fixedTime`/`ots.timezone` must always move as a pair -- either
 # both present or neither -- or `_resolve_triggers`'s own cross-field
 # validation raises (AC-INV-4 is about invocation count, not about
@@ -631,6 +631,7 @@ _ALL_KEYS = {
     "ots.signing": "required",
     "ots.proofcommit": "false",
     "ots.proofdirectory": "proofs",
+    "ots.squashupgradecommits": "true",
     "ots.command": "custom-ots",
     "ots.otstimeout": "45s",
     "ots.gittimeout": "20s",
@@ -641,7 +642,7 @@ _FIXED_PAIR = frozenset({"ots.fixedtime", "ots.timezone"})
 
 
 def _build_subsets() -> list[frozenset[str]]:
-    """0-through-15 is a 2**15 lattice; exhaustive enumeration is neither
+    """0-through-N is a 2**N lattice; exhaustive enumeration is neither
     feasible nor what VQ-S9-011 asks for ("ideally intermediate subsets").
     This builds a structurally-generated sample that covers every boundary
     (empty, full) and every individual key (as its own singleton, or paired
@@ -685,10 +686,11 @@ def test_ac_inv_4_read_boundedness_invariant_under_keys_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subset: frozenset[str]
 ) -> None:
     """AC-INV-4 / G4: the number of subprocess invocations
-    `gitconfig.assemble_config` performs is exactly `1 + B` (B = 4 boolean
-    keys), invariant with how many of the 15 `ots.*` keys are actually set
-    -- asserted identically for the empty subset, singleton subsets of
-    every key, and several multi-key subsets up to and including all 15.
+    `gitconfig.assemble_config` performs is exactly `1 + B` (B = the
+    schema's boolean keys), invariant with how many `ots.*` keys are
+    actually set -- asserted identically for the empty subset, singleton
+    subsets of every key, and several multi-key subsets up to and
+    including the whole schema.
 
     The counting wrapper below is a real `ProcessRunner`: it delegates every
     call to the genuine `make_process_runner`, which shells out to the real

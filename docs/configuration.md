@@ -43,6 +43,7 @@ git config ots.requireCleanWorktree false
 git config ots.signing inherit
 git config ots.proofCommit true
 git config ots.proofDirectory .opentimestamps
+git config ots.squashUpgradeCommits false
 git config ots.command ots
 git config ots.otsTimeout 120s
 git config ots.gitTimeout 60s
@@ -65,6 +66,7 @@ unconfigured repository uses:
 | `ots.signing` | `inherit` | `required` signs the tags and commits `git-ots` creates |
 | `ots.proofCommit` | `true` | Commit generated proofs |
 | `ots.proofDirectory` | `.opentimestamps` | Where proofs and manifests are stored |
+| `ots.squashUpgradeCommits` | `false` | Fold a repeated `upgrade` into the previous upgrade commit |
 | `ots.command` | `ots` | The client executable to invoke |
 | `ots.otsTimeout` | `120s` | Ceiling on an OpenTimestamps subprocess |
 | `ots.gitTimeout` | `60s` | Ceiling on a Git subprocess |
@@ -124,6 +126,100 @@ configuration says they live, and `run` refuses with exit 3 (`inconsistent
 repository state`) rather than silently timestamping the same commit twice.
 Older generated proof commits also start warning that they touch paths outside
 the configured directory, which is the same condition reported earlier.
+
+### `ots.squashUpgradeCommits`
+
+```bash
+git config ots.squashUpgradeCommits true
+```
+
+`git ots upgrade` writes a commit every time a calendar has something new to
+contribute. A proof that gains attestations over several days therefore leaves
+a run of commits that all say the same thing about the same files. With this
+set, an upgrade whose `HEAD` is already an upgrade commit amends that commit
+instead of stacking another on top; the resulting message names every source
+both commits refreshed.
+
+**What folding costs you.** The message keeps the full list of *which* sources
+were refreshed, and the proofs themselves are untouched — an attestation still
+carries the Bitcoin block that anchors it, which is the evidence this tool
+exists to produce, and no commit date was ever part of that. What goes is the
+operational chronology: the superseded commit IDs, their trees, and the
+committer timestamp of each individual refresh. After folding, the repository
+can still show *that* a proof was completed and *what* it claims, but not
+*when this clone fetched each attestation*. If that history is something you
+need — for an audit log of the machine's behavior rather than of the
+timestamps — leave the setting off.
+
+It is off by default because amending is a history rewrite, and whether that
+is acceptable is yours to decide. Nothing `git-ots` creates depends on an
+upgrade commit's identity -- an upgrade commit is never itself timestamped and
+never carries a tag -- so the only exposure is to anyone who has already seen
+the commit.
+
+**It only folds what is still local.** A successful `git push` updates
+`refs/remotes/origin/<branch>`, and the next upgrade then sees `HEAD` as
+published and declines. A schedule that pushes after every upgrade therefore
+never folds anything, and every run that upgrades something warns that it did
+not fold. The setting pays
+off where upgrade commits accumulate before being pushed: a local or mirrored
+repository, or a schedule that upgrades often and pushes rarely.
+
+That exposure is bounded rather than assumed away. Squashing is declined, and
+an ordinary commit made instead, when any of these holds:
+
+- `HEAD` is reachable from a remote-tracking ref, so amending would leave the
+  branch unable to fast-forward. This is reported on stderr, since it is a
+  case where you asked for a squash and did not get one. **This check finds
+  published commits; it cannot prove one is unpublished.** It reads your
+  cached `refs/remotes/*` and never contacts a remote, so a commit pushed from
+  another clone, pushed to a URL with no tracking ref, or pushed since your
+  last fetch looks local and will be amended. No local query can do better —
+  "nobody else has this" is not a fact a repository holds. Enable the setting
+  where you know the answer: a single working copy, or one that fetches before
+  it upgrades.
+- `HEAD`'s message is not exactly the message this tool writes for the sources
+  it names. The trailers alone do not prove authorship: a `git rebase -i` that
+  squashes an upgrade commit into a real one leaves a commit carrying both
+  trailers *and* your subject and body, and amending that would replace your
+  message with the tool's. This condition is also why a proof commit is never
+  amended -- it dates a submission and is the artifact recovery reads back --
+  and why the first upgrade after a `run` always makes its own commit. One
+  consequence to know about: a `commit-msg` hook that rewrites messages --
+  adding a `Change-Id` or `Signed-off-by` line, say -- or a `commit.cleanup`
+  setting that does, reshapes every upgrade commit as it is written, so in
+  that repository no upgrade commit is ever a target and the setting never
+  does anything. This decline is not a warning, because most mismatches are
+  simply commits that are not this tool's; `git ots upgrade --verbose` names
+  it.
+- `HEAD` changes a path outside the proof directory, or is a merge commit.
+- `HEAD` is signed and the fold would not sign the replacement. Amending
+  replaces the commit object, so its signature is recreated or gone; when
+  neither `ots.signing = required` nor an ambient `commit.gpgsign` applies, it
+  would be gone, and the fold is declined rather than quietly handing back an
+  unsigned commit. This is also reported on stderr.
+- `HEAD` has moved when rechecked immediately before an amend attempt,
+  including any retry after lock contention. The upgrade fails rather than
+  rewriting a commit nothing vetted; the proofs are already written and
+  staged, so the next run records them. With `ots.requireCleanWorktree` set,
+  that run refuses the dirty worktree first, so commit or stash the proofs
+  before it.
+
+The HEAD check and Git's amend are separate operations. Another writer can
+still move HEAD between them, so avoid concurrent repository mutations while
+upgrading with squashing enabled.
+
+A local tag or a second local branch pointing at `HEAD` is *not* a decline.
+Amending moves only the current branch, so nothing is lost -- but that branch
+and the other ref do then diverge.
+
+The amended commit keeps its original author date and takes a fresh committer
+date, so a squashed commit spans from the first upgrade it absorbed to the
+most recent.
+
+`git ots upgrade --dry-run` makes the same decision without writing anything
+and reports it: whether the proofs it would upgrade would be folded into the
+commit at `HEAD` or recorded in a new commit.
 
 ### `ots.otsTimeout` and `ots.gitTimeout`
 

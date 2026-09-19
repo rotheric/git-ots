@@ -47,8 +47,8 @@ from .git import GitCommandError, GitRunner, ProcessRunner
 # `ots.` namespace, not a key that merely contains "ots" elsewhere.
 _NAMESPACE_PATTERN = r"^ots\."
 
-# The four boolean-typed keys in the ots.* schema, in their canonical
-# lower-case form (Git lower-cases variable names; see `read_namespace`).
+# The boolean-typed keys in the ots.* schema, in their canonical lower-case
+# form (Git lower-cases variable names; see `read_namespace`).
 # This is B in the "1 + B" invocation bound: each is read with its own
 # `--type=bool --get`, unconditionally, so the invocation count never
 # depends on which keys an operator happened to set.
@@ -58,6 +58,7 @@ BOOLEAN_KEYS: frozenset[str] = frozenset(
         "ots.fetchbeforerun",
         "ots.requirecleanworktree",
         "ots.proofcommit",
+        "ots.squashupgradecommits",
     }
 )
 
@@ -66,7 +67,7 @@ BOOLEAN_KEYS: frozenset[str] = frozenset(
 class RawConfigValue:
     """One resolved ``ots.*`` record, exactly as Git config reported it.
 
-    ``value`` is a Python ``bool`` for the four keys in :data:`BOOLEAN_KEYS`,
+    ``value`` is a Python ``bool`` for the keys in :data:`BOOLEAN_KEYS`,
     resolved by Git's own ``--type=bool --get`` -- never by a lookup table
     this module implements. For every other key it is the raw string Git
     reported, already collapsed to last-entry-wins for a multivar (matching
@@ -98,12 +99,12 @@ def read_namespace(
     """Read the ``ots.*`` Git config namespace.
 
     Costs exactly ``1 + B`` subprocess invocations, where ``B`` is the
-    number of boolean-typed keys in the schema (four): one
+    number of boolean-typed keys in the schema (five): one
     ``git config -z --show-scope --get-regexp '^ots\\.'`` read of the
     whole namespace resolves every non-boolean key, and one
     ``git config -z --show-scope --type=bool --get`` read per schema
     boolean key resolves that key's presence, value and scope together
-    -- run unconditionally for all four, so the count never depends on
+    -- run unconditionally for all of them, so the count never depends on
     how many keys, boolean or not, an operator has set.
     """
 
@@ -235,7 +236,7 @@ class MappingRow:
     reused unmodified from ``config.py``, never reimplemented here (per
     architecture.md Boundary Rule 3) -- or ``None`` for a value
     `read_namespace` already produced in its final form (a Python ``bool``
-    for the schema's four boolean keys, a plain string for a str field).
+    for the schema's boolean keys, a plain string for a str field).
 
     ``is_trigger`` marks the four keys behaviour 8's scope-tier ladder
     governs (``ots.everyCommit``, ``ots.maxAge``, ``ots.fixedTime``,
@@ -275,11 +276,11 @@ def _parse_timeout(text: str) -> timedelta | None:
         raise ConfigError(f'{exc} (or "0" for unbounded)') from exc
 
 
-#: Behaviour 5's key-mapping table -- fifteen rows, one per ``Config``
+#: Behaviour 5's key-mapping table -- sixteen rows, one per ``Config``
 #: field across ``PolicyConfig`` (5), ``GitConfig`` (5), ``ProofConfig``
-#: (2), ``OpenTimestampsConfig`` (1) and ``LimitsConfig`` (2).
+#: (3), ``OpenTimestampsConfig`` (1) and ``LimitsConfig`` (2).
 #:
-#: ``ots.proofDirectory`` is the fifteenth row. FS-0015 behaviour 15 had no
+#: ``ots.proofDirectory`` has a row again. FS-0015 behaviour 15 had no
 #: row for it and :func:`assemble_config` rejected it as an unknown key; that
 #: is reversed -- the proof directory is configurable again, and the
 #: bidirectional field/key correspondence this table asserts holds with it
@@ -301,6 +302,7 @@ MAPPING: tuple[MappingRow, ...] = (
     MappingRow("ots.signing", "git", "signing", parse_signing),
     MappingRow("ots.proofcommit", "proof", "commit", None),
     MappingRow("ots.proofdirectory", "proof", "directory", validate_proof_directory),
+    MappingRow("ots.squashupgradecommits", "proof", "squash_upgrade_commits", None),
     MappingRow("ots.command", "opentimestamps", "command", None),
     MappingRow("ots.otstimeout", "limits", "ots_timeout", _parse_timeout),
     MappingRow("ots.gittimeout", "limits", "git_timeout", _parse_timeout),
@@ -309,7 +311,7 @@ MAPPING: tuple[MappingRow, ...] = (
 _MAPPING_BY_KEY: dict[str, MappingRow] = {row.key: row for row in MAPPING}
 
 # Sanity: MAPPING must name every boolean key the raw reader resolves, and
-# no others -- both modules describe the same fifteen-key schema.
+# no others -- both modules describe the same sixteen-key schema.
 assert {
     row.key for row in MAPPING if row.parse is None and row.key in BOOLEAN_KEYS
 } == BOOLEAN_KEYS
@@ -503,7 +505,7 @@ def _assemble(
     7 -- no rewording). The four policy-trigger keys resolve through
     :func:`_resolve_triggers` instead of the generic per-key path.
 
-    The returned origin map has exactly :data:`MAPPING`'s fifteen keys,
+    The returned origin map has exactly :data:`MAPPING`'s sixteen keys,
     each valued ``"git config <scope>"`` or ``"default"`` -- the full
     vocabulary AC-REPORT-1 permits and no other.
     """
@@ -593,7 +595,7 @@ def describe_effective_configuration(
     origin, which would silently double this call's invocation count against
     the ``1 + B`` bound AC-PERF-1/AC-INV-4 pin for every other command.
 
-    The origin map has one entry per :data:`MAPPING` row (fifteen keys,
+    The origin map has one entry per :data:`MAPPING` row (sixteen keys,
     canonical lower-case ``ots.*`` spelling), each either
     ``"git config <scope>"`` -- Git's own ``system``/``global``/``local``/
     ``worktree``, or ``command`` for ``-c``/``GIT_CONFIG_*`` -- or the

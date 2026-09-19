@@ -16,7 +16,7 @@ def test_exposes_version():
 
     assert hasattr(git_ots, "__version__")
     assert isinstance(git_ots.__version__, str)
-    assert git_ots.__version__ == "0.0.1"
+    assert git_ots.__version__ == "0.0.2"
     assert version("git-ots") == git_ots.__version__
 
 
@@ -24,4 +24,4 @@ def test_cli_reports_version(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["--version"])
     assert excinfo.value.code == 0
-    assert capsys.readouterr().out == "0.0.1\n"
+    assert capsys.readouterr().out == "0.0.2\n"

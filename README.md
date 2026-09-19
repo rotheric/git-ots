@@ -63,6 +63,20 @@ git ots upgrade
 If new Bitcoin attestations become available, the updated proofs are stored in
 a new generated commit. Running the command again is safe.
 
+Attestations arrive over days, so upgrading on a schedule leaves a run of such
+commits. To keep them to one, let each upgrade amend the previous one instead:
+
+```bash
+git config ots.squashUpgradeCommits true
+```
+
+This rewrites history and is therefore off by default. It folds only what
+your repository still believes is local, so a schedule that pushes after every
+upgrade will not fold anything — and the collapsed commits take the record of
+*when* each refresh happened with them. See
+[Configuration and scheduling](docs/configuration.md#otssquashupgradecommits)
+for what is kept, what is lost, and when folding is declined.
+
 ### Validate and verify
 
 Check repository structure and proof-to-commit binding offline:

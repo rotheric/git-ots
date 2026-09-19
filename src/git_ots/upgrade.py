@@ -23,10 +23,12 @@ from .config import Config
 from .git import (
     InvalidRepositoryStateError,
     RepositoryLock,
+    amend_upgrade_commit,
     assert_committable_state,
     assert_worktree_present,
     create_upgrade_commit,
     detect_object_format,
+    find_squashable_upgrade_commit,
     is_worktree_clean,
     locate_repository,
     read_tree_bytes,
@@ -85,10 +87,26 @@ class UpgradeResult:
 
 @dataclass(frozen=True, slots=True)
 class UpgradeReport:
-    """Outcome of a whole upgrade pass, plus the commit it produced if any."""
+    """Outcome of a whole upgrade pass, plus the commit it produced if any.
+
+    ``squashed`` records that ``commit_id`` names an amended predecessor
+    rather than a commit added on top -- the outcome of
+    ``[proof] squash_upgrade_commits``. It is reported rather than inferred
+    because the two cases are indistinguishable from the result alone:
+    ``commit_id`` is a fresh object ID either way, since amending rewrites
+    the commit.
+
+    ``would_squash_into`` is the dry-run counterpart: the object ID of the
+    upgrade commit at ``HEAD`` that a real pass would amend, or ``None`` when
+    nothing would be upgraded, squashing is off, or ``HEAD`` is not a target.
+    A dry run is the one moment an operator can see the fold decision before
+    it rewrites anything, so the decision is made and reported there too.
+    """
 
     results: tuple[UpgradeResult, ...]
     commit_id: str | None
+    squashed: bool = False
+    would_squash_into: str | None = None
 
 
 class _UpgradeClient(Protocol):
@@ -411,7 +429,9 @@ def upgrade_proofs(
     Scans the configured proof directory, asks the OpenTimestamps client to
     complete each pending proof, and atomically rewrites the ones that gained
     attestations. When ``[proof] commit`` is enabled the changed ``.ots``
-    files are committed as a single generated commit.
+    files are committed as a single generated commit -- or, with
+    ``[proof] squash_upgrade_commits`` and an amendable upgrade commit at
+    ``HEAD``, folded into that one instead of stacking a second on top.
 
     ``dry_run`` reports what would be attempted and performs no network access
     and no writes. Malformed or unbound proofs are reported and left untouched
@@ -533,7 +553,28 @@ def upgrade_proofs(
                         promised_calendars=len(described.promised_calendars),
                     )
                 )
-            return UpgradeReport(results=tuple(_ordered(results)), commit_id=None)
+            # The fold decision is read-only, so a dry run can make it and
+            # say what a real pass would do. Only asked when something would
+            # be upgraded, matching the real pass, where the target is looked
+            # up only once there is something to commit.
+            would_squash_into = None
+            if (
+                config.proof.commit
+                and config.proof.squash_upgrade_commits
+                and any(r.state is UpgradeState.WOULD_UPGRADE for r in results)
+            ):
+                target = find_squashable_upgrade_commit(
+                    cwd=repository_root,
+                    proof_directory=config.proof.directory,
+                    sign=config.git.signs_generated_objects,
+                    process_runner=process_runner,
+                )
+                would_squash_into = target.commit_id if target is not None else None
+            return UpgradeReport(
+                results=tuple(_ordered(results)),
+                commit_id=None,
+                would_squash_into=would_squash_into,
+            )
 
         _client = (
             client
@@ -575,22 +616,53 @@ def upgrade_proofs(
                 upgraded_sources.append(candidate.source_commit_id)
 
         commit_id = None
+        squashed = False
         if upgraded_sources and config.proof.commit:
             paths = [
                 f"{config.proof.directory}/{source_id}.ots"
                 for source_id in upgraded_sources
             ]
-            stage_paths(cwd=repository_root, paths=paths, process_runner=process_runner)
-            commit_id = create_upgrade_commit(
-                cwd=repository_root,
-                source_commit_ids=upgraded_sources,
-                proof_directory=config.proof.directory,
-                paths=paths,
-                sign=config.git.signs_generated_objects,
-                process_runner=process_runner,
+            # The squash target is read before anything is staged: it depends
+            # only on the commit at HEAD, and reading it first keeps the
+            # decision independent of the staging this pass is about to do.
+            # It carries the resolved object ID, not the name `HEAD`, and
+            # `amend_upgrade_commit` refuses if HEAD has left it since.
+            target = (
+                find_squashable_upgrade_commit(
+                    cwd=repository_root,
+                    proof_directory=config.proof.directory,
+                    sign=config.git.signs_generated_objects,
+                    process_runner=process_runner,
+                )
+                if config.proof.squash_upgrade_commits
+                else None
             )
+            stage_paths(cwd=repository_root, paths=paths, process_runner=process_runner)
+            if target is None:
+                commit_id = create_upgrade_commit(
+                    cwd=repository_root,
+                    source_commit_ids=upgraded_sources,
+                    proof_directory=config.proof.directory,
+                    paths=paths,
+                    sign=config.git.signs_generated_objects,
+                    process_runner=process_runner,
+                )
+            else:
+                commit_id = amend_upgrade_commit(
+                    cwd=repository_root,
+                    expected_head=target.commit_id,
+                    previous_source_commit_ids=target.source_commit_ids,
+                    source_commit_ids=upgraded_sources,
+                    proof_directory=config.proof.directory,
+                    paths=paths,
+                    sign=config.git.signs_generated_objects,
+                    process_runner=process_runner,
+                )
+                squashed = True
 
-        return UpgradeReport(results=tuple(_ordered(results)), commit_id=commit_id)
+        return UpgradeReport(
+            results=tuple(_ordered(results)), commit_id=commit_id, squashed=squashed
+        )
 
 
 def _ordered(results: list[UpgradeResult]) -> list[UpgradeResult]:

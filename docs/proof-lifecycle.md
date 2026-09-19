@@ -351,6 +351,18 @@ already made that claim.
 Manifests are not rewritten: `submitted_at` records the submission, not the
 upgrade.
 
+A proof rarely gains everything it will ever have in one pass — one calendar
+confirms, another follows days later — so a repository that upgrades on a
+schedule accumulates a run of these commits. Setting
+`ots.squashUpgradeCommits` folds each one into its predecessor instead, when
+the predecessor is an upgrade commit your repository has no record of having
+published; the amended message names every source both commits refreshed. The
+trade is that the per-refresh chronology — which attestation arrived on which
+day — is collapsed along with the commits. The proofs keep their own Bitcoin
+anchors either way, so nothing the timestamps assert depends on this. See
+[Configuration](configuration.md#otssquashupgradecommits) for the full list of
+cases where folding is declined, and why it is off by default.
+
 Because `upgrade` mutates proof files, `ots.requireCleanWorktree` is
 honored the same way it is for `run` -- off unless you set it -- and when set
 the check happens before any proof is rewritten.

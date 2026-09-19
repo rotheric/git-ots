@@ -339,9 +339,9 @@ def make_process_runner(*, timeout: float | None) -> ProcessRunner:
     difference: that helper's ``stdin`` parameter expects already-decoded
     text in text mode, but :data:`ProcessRunner`'s contract -- the one
     ``GitRunner.run`` actually calls through -- always passes ``bytes`` (or
-    ``None``); ``git.py:826``/``:1164`` (``has_generated_trailer`` and
-    ``_extract_generated_commit_sources``, both ``git interpret-trailers
-    --parse``) pass real ``body.encode("utf-8")`` payloads. A bare
+    ``None``); :func:`has_generated_trailer` and
+    :func:`_read_message_and_trailers`, both ``git interpret-trailers
+    --parse``, pass real ``body.encode("utf-8")`` payloads. A bare
     ``partial`` skips the decode step this factory performs and fails on
     any non-empty stdin (``AttributeError: 'bytes' object has no attribute
     'encode'`` from ``communicate()``'s own text-mode encoding, since
@@ -927,6 +927,7 @@ class CommitInfo:
 
 GENERATED_TRAILER_KEY = "OpenTimestamps-Generated"
 GENERATED_TRAILER_VALUE = "true"
+SOURCE_TRAILER_KEY = "OpenTimestamps-Source"
 UPGRADED_TRAILER_KEY = "OpenTimestamps-Upgraded"
 
 
@@ -1184,6 +1185,7 @@ def run_with_index_lock_retry(
     retry_window: float | None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    before_attempt: Callable[[], None] | None = None,
 ) -> GitSuccess:
     """Run an index-mutating Git command, waiting out index-lock contention.
 
@@ -1194,12 +1196,17 @@ def run_with_index_lock_retry(
     ``GitCommandError`` propagates on the first attempt, unchanged, so a
     rejected pre-commit hook still fails immediately and loudly.
 
+    ``before_attempt`` revalidates any mutable preconditions before each
+    invocation, including retries after another writer releases the lock.
+
     The window is deliberately spent on *retries* rather than folded into the
     per-command ceiling: ``ots.gitTimeout`` bounds how long one Git invocation
     may run, which is a different question from how long the tool is willing
     to wait for another process to let go of the index.
     """
     if retry_window is None or retry_window <= 0:
+        if before_attempt is not None:
+            before_attempt()
         return runner.run(list(argv))
 
     deadline = monotonic() + retry_window
@@ -1207,6 +1214,8 @@ def run_with_index_lock_retry(
     attempt = 0
     while True:
         attempt += 1
+        if before_attempt is not None:
+            before_attempt()
         try:
             return runner.run(list(argv))
         except GitCommandError as exc:
@@ -1400,17 +1409,21 @@ def _log_generated_trailer_commit_ids(
     return tuple(found)
 
 
-def _extract_generated_commit_sources(
+def _read_message_and_trailers(
     *,
     cwd: Path,
     commit: str,
     process_runner: ProcessRunner | None = None,
-) -> tuple[str, ...]:
-    """Return source commit IDs from a commit's ``OpenTimestamps-Source`` trailers.
+) -> tuple[str, tuple[str, ...]]:
+    """Return ``commit``'s raw message body and its parsed trailer lines.
 
-    Parses only actual trailer lines using ``git interpret-trailers --parse``
-    so body text that merely looks like a trailer is ignored. Returns an empty
-    tuple when the commit has no such trailers. Raises
+    One read of both, because a caller that needs the trailers usually needs
+    the message they came out of: reading them separately costs a second
+    ``log`` and a second ``interpret-trailers``, and lets the two answers be
+    about different commits if the ref moves between them.
+
+    ``--parse`` means only actual trailer lines are returned, so body text
+    that merely looks like a trailer is not among them. Raises
     :class:`InvalidRepositoryStateError` when ``commit`` cannot be resolved.
     """
 
@@ -1420,7 +1433,7 @@ def _extract_generated_commit_sources(
         runner.run(["rev-parse", "--verify", f"{commit}^{{commit}}"])
     except GitCommandError as exc:
         raise InvalidRepositoryStateError(
-            f"cannot read generated sources for unknown commit {commit!r}: "
+            f"cannot read the message of unknown commit {commit!r}: "
             f"{exc.stderr.strip() or exc}"
         ) from exc
 
@@ -1429,13 +1442,53 @@ def _extract_generated_commit_sources(
         ["interpret-trailers", "--parse"],
         stdin=body.encode("utf-8"),
     ).stdout
+    return body, tuple(parsed.splitlines())
 
-    prefix = "OpenTimestamps-Source: "
-    sources: list[str] = []
-    for line in parsed.splitlines():
-        if line.startswith(prefix):
-            sources.append(line[len(prefix) :].strip())
-    return tuple(sources)
+
+def _trailer_values(trailer_lines: Sequence[str], key: str) -> tuple[str, ...]:
+    """Pick one key's values out of parsed trailer lines, in message order.
+
+    The key is matched case-sensitively against its canonical spelling,
+    matching :func:`has_generated_trailer` -- Git's own ``%(trailers:key=...)``
+    matches case-insensitively, which would accept miscased keys this tool
+    rejects everywhere else.
+    """
+
+    prefix = f"{key}: "
+    return tuple(
+        line[len(prefix) :].strip() for line in trailer_lines if line.startswith(prefix)
+    )
+
+
+def _extract_trailer_values(
+    *,
+    cwd: Path,
+    commit: str,
+    key: str,
+    process_runner: ProcessRunner | None = None,
+) -> tuple[str, ...]:
+    """Return the values of ``commit``'s ``key`` trailers, in message order."""
+
+    _body, trailer_lines = _read_message_and_trailers(
+        cwd=cwd, commit=commit, process_runner=process_runner
+    )
+    return _trailer_values(trailer_lines, key)
+
+
+def _extract_generated_commit_sources(
+    *,
+    cwd: Path,
+    commit: str,
+    process_runner: ProcessRunner | None = None,
+) -> tuple[str, ...]:
+    """Return source commit IDs from a commit's ``OpenTimestamps-Source`` trailers."""
+
+    return _extract_trailer_values(
+        cwd=cwd,
+        commit=commit,
+        key=SOURCE_TRAILER_KEY,
+        process_runner=process_runner,
+    )
 
 
 def get_commit_parents(
@@ -2924,7 +2977,7 @@ def create_generated_proof_commit(
 
     body_lines = [f"{GENERATED_TRAILER_KEY}: {GENERATED_TRAILER_VALUE}"]
     for source_id in source_commit_ids:
-        body_lines.append(f"OpenTimestamps-Source: {source_id}")
+        body_lines.append(f"{SOURCE_TRAILER_KEY}: {source_id}")
     message = subject + "\n\n" + "\n".join(body_lines) + "\n"
 
     runner = GitRunner(cwd=cwd, process_runner=process_runner)
@@ -2981,15 +3034,7 @@ def create_upgrade_commit(
     if any(not p for p in paths):
         raise ValueError("paths must not contain empty values")
 
-    if len(source_commit_ids) == 1:
-        subject = f"Upgrade OpenTimestamps proof for {source_commit_ids[0][:12]}"
-    else:
-        subject = f"Upgrade {len(source_commit_ids)} OpenTimestamps proofs"
-
-    body_lines = [f"{GENERATED_TRAILER_KEY}: {GENERATED_TRAILER_VALUE}"]
-    for source_id in source_commit_ids:
-        body_lines.append(f"{UPGRADED_TRAILER_KEY}: {source_id}")
-    message = subject + "\n\n" + "\n".join(body_lines) + "\n"
+    message = _upgrade_commit_message(source_commit_ids)
 
     runner = GitRunner(cwd=cwd, process_runner=process_runner)
     commit_argv = ["commit", "-q"]
@@ -3002,3 +3047,371 @@ def create_upgrade_commit(
     run_with_index_lock_retry(runner, commit_argv, retry_window=index_lock_retry_window)
 
     return runner.run(["rev-parse", "HEAD"]).stdout.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class SquashTarget:
+    """An upgrade commit that may absorb another, pinned by object ID.
+
+    ``commit_id`` is the resolved object ID, never the symbolic ``HEAD`` the
+    caller asked about. Every eligibility check is made against that ID, and
+    :func:`amend_upgrade_commit` re-reads ``HEAD`` and refuses unless it is
+    still the same object -- so a branch that moves between the decision and
+    the rewrite aborts the rewrite instead of redirecting it onto whatever
+    arrived in the meantime.
+    """
+
+    commit_id: str
+    source_commit_ids: tuple[str, ...]
+
+
+def find_squashable_upgrade_commit(
+    *,
+    cwd: Path,
+    proof_directory: str,
+    commit: str = "HEAD",
+    sign: bool = False,
+    process_runner: ProcessRunner | None = None,
+) -> SquashTarget | None:
+    """Return the commit a new upgrade may be folded into, or ``None``.
+
+    ``None`` means "make an ordinary commit instead", and is the answer
+    whenever ``commit`` does not have exactly the shape
+    :func:`create_upgrade_commit` writes. The caller only consults this when
+    ``[proof] squash_upgrade_commits`` is enabled; the decision to fold is
+    the operator's, but whether folding is *safe here* is not, so every
+    condition below is checked rather than assumed:
+
+    * at least one ``OpenTimestamps-Upgraded`` trailer is present;
+    * the message is byte-for-byte what :func:`_upgrade_commit_message` would
+      write for exactly those sources. This is the load-bearing check, and it
+      is deliberately stricter than classification by trailer (ADR D3). A
+      trailer-bearing commit is not necessarily one this tool wrote as it now
+      stands: ``git rebase -i`` squashing an upgrade commit into a real one
+      concatenates the two messages, so the result carries the generated and
+      upgraded trailers *and* the operator's own subject and body. Amending
+      that would preserve its tree but replace its message with this tool's,
+      destroying the only copy of what the operator wrote. Requiring the
+      whole message also subsumes the trailers this tool's own message
+      always has and never has -- ``OpenTimestamps-Generated: true`` present,
+      ``OpenTimestamps-Source`` absent -- so a proof commit, which dates a
+      submission and is the recovery artifact §22.3 reads back, is never a
+      target either;
+    * the commit changes nothing outside ``proof_directory``. §13 asks for a
+      warning when a trailer-bearing commit reaches outside it; here the
+      commit is about to be rewritten rather than merely classified, so the
+      same condition declines instead of warning;
+    * the commit has exactly one parent, so amending cannot reshape a merge;
+    * amending will not silently drop a signature the commit already carries
+      -- see :func:`_amend_would_drop_a_signature`;
+    * the commit is not reachable from any remote-tracking ref. Amending a
+      published commit produces a branch that no longer fast-forwards, which
+      turns a scheduled upgrade into a failing push. This is the one
+      declined case an operator asked for and did not get, so it is logged.
+
+    What the message check is *not* is a proof of authorship. It establishes
+    shape, not provenance: a commit somebody hand-wrote to be byte-identical,
+    touching only the proof directory, with one parent and unpushed, is
+    indistinguishable from one this tool wrote and is treated as one. Git
+    records no durable "this tool made this object" marker that a rewrite
+    could rely on, so shape is the strongest available test; every condition
+    above exists to keep the set of commits with that shape to ones where
+    amending loses nothing.
+
+    Reachability is judged against this repository's own ``refs/remotes/*``,
+    which is knowledge of what *this clone* has seen pushed, not proof that a
+    commit is unpublished -- see :func:`is_published`. A local tag or a second
+    local branch pointing at ``commit`` is not a decline: amending moves only
+    the current branch, and those refs keep the old object, so nothing is lost
+    -- but the two do then diverge.
+    """
+
+    _validate_proof_directory(proof_directory)
+
+    # Resolved once, and every check below is made against this ID rather
+    # than against the symbolic name: a caller passing "HEAD" must not have
+    # one condition answered about one commit and another about its
+    # successor. `amend_upgrade_commit` is handed the same ID and refuses if
+    # HEAD has left it.
+    try:
+        commit_id = (
+            GitRunner(cwd=cwd, process_runner=process_runner)
+            .run(["rev-parse", "--verify", f"{commit}^{{commit}}"])
+            .stdout.strip()
+        )
+    except GitCommandError as exc:
+        raise InvalidRepositoryStateError(
+            f"cannot resolve {commit!r} while looking for a squash target: "
+            f"{exc.stderr.strip() or exc}"
+        ) from exc
+
+    message, trailer_lines = _read_message_and_trailers(
+        cwd=cwd, commit=commit_id, process_runner=process_runner
+    )
+    upgraded = _trailer_values(trailer_lines, UPGRADED_TRAILER_KEY)
+    if not upgraded:
+        return None
+    # Trailing newlines are the one difference that is not a difference:
+    # `--format=%B` emits the body plus a newline of its own, and Git's own
+    # `-m` cleanup already collapsed any trailing blank lines before the
+    # commit was written, so neither side can carry a meaningful one.
+    if message.rstrip("\n") != _upgrade_commit_message(upgraded).rstrip("\n"):
+        # Below warning level: most mismatches are simply commits that are
+        # not this tool's, and an operator did not ask to hear about those.
+        # The case worth surfacing under --verbose is the repository whose
+        # commit-msg hook or commit.cleanup setting reshapes every message
+        # as it is written, so that no upgrade commit is ever a target and
+        # the setting silently never does anything.
+        _logger.info(
+            "Not squashing into commit %s: it carries OpenTimestamps-Upgraded "
+            "trailers, but its message is not the one this tool writes for "
+            "them. A commit-msg hook or commit.cleanup setting that alters "
+            "messages makes every upgrade commit ineligible.",
+            commit_id[:12],
+        )
+        return None
+
+    changed = _list_changed_paths(
+        cwd=cwd, commit=commit_id, process_runner=process_runner
+    )
+    prefix = f"{proof_directory}/"
+    if any(not path.startswith(prefix) for path in changed):
+        return None
+
+    if (
+        len(
+            get_commit_parents(cwd=cwd, commit=commit_id, process_runner=process_runner)
+        )
+        != 1
+    ):
+        return None
+
+    if _amend_would_drop_a_signature(
+        cwd=cwd, commit=commit_id, sign=sign, process_runner=process_runner
+    ):
+        _logger.warning(
+            "Not squashing into upgrade commit %s: it is signed, and this "
+            "configuration would replace it with an unsigned commit. "
+            "The upgrade goes into a new commit instead.",
+            commit_id[:12],
+        )
+        return None
+
+    if is_published(cwd=cwd, commit=commit_id, process_runner=process_runner):
+        _logger.warning(
+            "Not squashing into upgrade commit %s: it is already reachable "
+            "from a remote-tracking ref, and amending it would leave this "
+            "branch unable to fast-forward. The upgrade goes into a new "
+            "commit instead.",
+            commit_id[:12],
+        )
+        return None
+
+    return SquashTarget(commit_id=commit_id, source_commit_ids=upgraded)
+
+
+def _commit_is_signed(
+    *,
+    cwd: Path,
+    commit: str,
+    process_runner: ProcessRunner | None = None,
+) -> bool:
+    """Return whether ``commit`` carries a signature header.
+
+    Reads the object's headers directly rather than asking for ``%G?``:
+    ``%G?`` reports the *verification* result, which needs a working GnuPG and
+    the signer's public key, and answers "no good signature" for a signature
+    this machine merely cannot check. The question here is whether a
+    signature exists to be destroyed, which is a property of the object.
+    """
+
+    runner = GitRunner(cwd=cwd, process_runner=process_runner)
+    raw = runner.run(["cat-file", "commit", commit]).stdout
+    headers = raw.split("\n\n", 1)[0]
+    return any(
+        line.startswith(("gpgsig ", "gpgsig-sha256 ")) for line in headers.splitlines()
+    )
+
+
+def _amend_would_drop_a_signature(
+    *,
+    cwd: Path,
+    commit: str,
+    sign: bool = False,
+    process_runner: ProcessRunner | None = None,
+) -> bool:
+    """Return whether amending ``commit`` would leave it unsigned.
+
+    A squash replaces the commit object, so its signature is not carried over
+    -- it is recreated, or it is gone. ``sign`` is this tool's own
+    ``[git] signing = required``; ambient ``commit.gpgsign`` signs the amended
+    commit just as well, and is consulted because ``inherit`` deliberately
+    passes no flag of its own (see :class:`~git_ots.config.GitConfig`). Only
+    when neither applies does the rewrite actually lose something, and only
+    then is it worth declining a fold the operator asked for.
+    """
+
+    if not _commit_is_signed(cwd=cwd, commit=commit, process_runner=process_runner):
+        return False
+    if sign:
+        return False
+
+    runner = GitRunner(cwd=cwd, process_runner=process_runner)
+    try:
+        ambient = runner.run(
+            ["config", "--type=bool", "--get", "commit.gpgsign"]
+        ).stdout.strip()
+    except GitCommandError as exc:
+        if exc.exit_code == 1:  # unset in every scope
+            return True
+        raise
+    return ambient != "true"
+
+
+def is_published(
+    *,
+    cwd: Path,
+    commit: str,
+    process_runner: ProcessRunner | None = None,
+) -> bool:
+    """Return True when ``commit`` is reachable from any remote-tracking ref.
+
+    ``git rev-list --max-count=1 <commit> --not --remotes`` lists the newest
+    commit reachable from ``commit`` but from no ``refs/remotes/*`` ref; empty
+    output therefore means ``commit`` itself is already in one of them.
+
+    A True answer is reliable; a False one is not proof of anything. This
+    reads cached remote-tracking refs, so it reports what *this clone has
+    seen*, and a commit can be published without that showing here: pushed
+    from another clone, pushed to a URL that leaves no tracking ref, sitting
+    behind a pruned or deleted tracking ref, or simply pushed since the last
+    fetch. No purely local query can do better -- non-publication is not a
+    fact a repository holds -- so callers must treat False as "not known to be
+    published" and size the consequences accordingly, never as a guarantee
+    that rewriting is invisible to others.
+    """
+
+    runner = GitRunner(cwd=cwd, process_runner=process_runner)
+    output = runner.run(
+        ["rev-list", "--max-count=1", commit, "--not", "--remotes"]
+    ).stdout.strip()
+    return output == ""
+
+
+def amend_upgrade_commit(
+    *,
+    cwd: Path,
+    expected_head: str,
+    previous_source_commit_ids: Sequence[str],
+    source_commit_ids: Sequence[str],
+    proof_directory: str,
+    paths: Sequence[str],
+    sign: bool = False,
+    process_runner: ProcessRunner | None = None,
+    index_lock_retry_window: float | None = None,
+) -> str:
+    """Fold newly upgraded proofs into the upgrade commit already at ``HEAD``.
+
+    ``expected_head`` is the object ID
+    :func:`find_squashable_upgrade_commit` approved. ``HEAD`` is re-read
+    immediately before the rewrite and must still be that object, or the call
+    raises :class:`InvalidRepositoryStateError` without touching anything.
+    This matters because ``git commit --amend`` names no commit: it rewrites
+    whatever ``HEAD`` points at *now*. Every eligibility check was made
+    against one specific object, and :class:`RepositoryLock` excludes only
+    other ``git-ots`` invocations -- an ordinary ``git commit`` in another
+    terminal can still advance the branch in between. Without this check the
+    rewrite would silently land on that new, entirely unvetted commit and
+    replace its message.
+
+    The re-read narrows the window rather than closing it: nothing Git offers
+    makes "amend, but only if HEAD is still X" a single atomic operation
+    while also running hooks and honoring signing configuration the way an
+    ordinary commit does. HEAD is checked again before every lock retry,
+    but a concurrent writer can still move it between the check and Git
+    reading HEAD. Callers must avoid concurrent repository mutations.
+
+    The replacement message names the union of
+    ``previous_source_commit_ids`` -- what the commit being amended already
+    claimed, as read by :func:`find_squashable_upgrade_commit` -- and
+    ``source_commit_ids``, in that order and deduplicated. The union is the
+    point of taking both: a squashed commit that named only the new sources
+    would silently drop the record that the others were ever refreshed.
+
+    ``git commit --amend -- <paths>`` rebuilds the commit from ``HEAD``'s own
+    tree with only the named paths updated, so proofs an earlier upgrade
+    committed survive untouched and unrelated worktree or index changes are no
+    more included than :func:`create_upgrade_commit` includes them. The author
+    date carries over from the commit being amended and the committer date
+    becomes now, so the squashed commit spans from the first upgrade it
+    absorbed to the most recent.
+
+    Returns the full object ID of the amended commit, which is necessarily a
+    new one: amending rewrites the object.
+    """
+
+    if not proof_directory:
+        raise ValueError("proof_directory must not be empty")
+    if not expected_head:
+        raise ValueError("expected_head must not be empty")
+    if not source_commit_ids:
+        raise ValueError("source_commit_ids must not be empty")
+    if any(not sid for sid in source_commit_ids):
+        raise ValueError("source_commit_ids must not contain empty values")
+    if any(not sid for sid in previous_source_commit_ids):
+        raise ValueError("previous_source_commit_ids must not contain empty values")
+    if not paths:
+        raise ValueError("paths must not be empty")
+    if any(not p for p in paths):
+        raise ValueError("paths must not contain empty values")
+
+    merged = list(dict.fromkeys([*previous_source_commit_ids, *source_commit_ids]))
+    message = _upgrade_commit_message(merged)
+
+    runner = GitRunner(cwd=cwd, process_runner=process_runner)
+
+    def check_head() -> None:
+        current_head = runner.run(
+            ["rev-parse", "--verify", "HEAD^{commit}"]
+        ).stdout.strip()
+        if current_head != expected_head:
+            raise InvalidRepositoryStateError(
+                f"refusing to amend: HEAD moved from {expected_head[:12]} to "
+                f"{current_head[:12]} after the squash target was approved; the "
+                f"upgraded proofs are written and staged, and the next run records "
+                f"them -- unless ots.requireCleanWorktree is set, in which case "
+                f"commit or stash them first"
+            )
+
+    commit_argv = ["commit", "-q", "--amend"]
+    if sign:
+        commit_argv.append("-S")
+    commit_argv += ["-m", message, "--", *paths]
+    run_with_index_lock_retry(
+        runner,
+        commit_argv,
+        retry_window=index_lock_retry_window,
+        before_attempt=check_head,
+    )
+
+    return runner.run(["rev-parse", "HEAD"]).stdout.strip()
+
+
+def _upgrade_commit_message(source_commit_ids: Sequence[str]) -> str:
+    """Build the message shared by a created and an amended upgrade commit.
+
+    One function rather than two so a squashed commit is textually
+    indistinguishable from the single commit the same upgrades would have
+    produced had they arrived together -- and so the next squash reads its
+    predecessor's trailers back with the same parser that wrote them.
+    """
+
+    if len(source_commit_ids) == 1:
+        subject = f"Upgrade OpenTimestamps proof for {source_commit_ids[0][:12]}"
+    else:
+        subject = f"Upgrade {len(source_commit_ids)} OpenTimestamps proofs"
+
+    body_lines = [f"{GENERATED_TRAILER_KEY}: {GENERATED_TRAILER_VALUE}"]
+    for source_id in source_commit_ids:
+        body_lines.append(f"{UPGRADED_TRAILER_KEY}: {source_id}")
+    return subject + "\n\n" + "\n".join(body_lines) + "\n"

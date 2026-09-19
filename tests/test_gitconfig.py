@@ -245,31 +245,16 @@ def test_boolean_type_get_non_one_exit_code_propagates_as_git_command_error() ->
             "",
             "fatal: bad boolean config value 'maybe' for 'ots.everycommit'\n",
         ),
-        (
-            "config",
-            "-z",
-            "--show-scope",
-            "--type=bool",
-            "--get-all",
-            "ots.fetchbeforerun",
-        ): (1, "", ""),
-        (
-            "config",
-            "-z",
-            "--show-scope",
-            "--type=bool",
-            "--get-all",
-            "ots.requirecleanworktree",
-        ): (1, "", ""),
-        (
-            "config",
-            "-z",
-            "--show-scope",
-            "--type=bool",
-            "--get-all",
-            "ots.proofcommit",
-        ): (1, "", ""),
     }
+    # `read_namespace` walks `BOOLEAN_KEYS`, a frozenset, so the failing key
+    # is not necessarily reached first: every other schema boolean has to be
+    # scripted, and derived rather than listed so the schema can grow.
+    for key in BOOLEAN_KEYS - {"ots.everycommit"}:
+        script[("config", "-z", "--show-scope", "--type=bool", "--get-all", key)] = (
+            1,
+            "",
+            "",
+        )
     runner = _scripted_runner(script, recorded)
 
     with pytest.raises(GitCommandError) as excinfo:
@@ -320,6 +305,9 @@ def test_boolean_resolution_ignores_the_raw_string_and_trusts_the_typed_read() -
     inspected the raw string itself, this would not resolve to `True`."""
 
     recorded: list[dict] = []
+    # Every schema boolean but `ots.everyCommit` reads as unset, derived from
+    # `BOOLEAN_KEYS` rather than listed, so adding a key to the schema does
+    # not silently turn this into a KeyError in `_scripted_runner`.
     script: dict[tuple[str, ...], tuple[int, str, str]] = {
         ("config", "-z", "--show-scope", "--get-regexp", r"^ots\."): (
             0,
@@ -334,31 +322,13 @@ def test_boolean_resolution_ignores_the_raw_string_and_trusts_the_typed_read() -
             "--get-all",
             "ots.everycommit",
         ): (0, _bool_stdout("local", "true"), ""),
-        (
-            "config",
-            "-z",
-            "--show-scope",
-            "--type=bool",
-            "--get-all",
-            "ots.fetchbeforerun",
-        ): (1, "", ""),
-        (
-            "config",
-            "-z",
-            "--show-scope",
-            "--type=bool",
-            "--get-all",
-            "ots.requirecleanworktree",
-        ): (1, "", ""),
-        (
-            "config",
-            "-z",
-            "--show-scope",
-            "--type=bool",
-            "--get-all",
-            "ots.proofcommit",
-        ): (1, "", ""),
     }
+    for key in BOOLEAN_KEYS - {"ots.everycommit"}:
+        script[("config", "-z", "--show-scope", "--type=bool", "--get-all", key)] = (
+            1,
+            "",
+            "",
+        )
     runner = _scripted_runner(script, recorded)
 
     records = read_namespace(cwd=Path("/repo"), process_runner=runner)
@@ -407,10 +377,10 @@ def _script_for(*, keys_set: bool) -> dict[tuple[str, ...], tuple[int, str, str]
     return script
 
 
-def test_invocation_count_is_invariant_between_zero_and_all_fifteen_keys_set() -> None:
-    """The ceiling is `1 + B` (B = 4 boolean-typed keys), so at most 5.
+def test_invocation_count_is_invariant_between_zero_and_all_keys_set() -> None:
+    """The ceiling is `1 + B` (B = the schema's boolean-typed keys).
     A repository with zero `ots.*` keys set must cost exactly the same
-    number of invocations as one with all fifteen set -- the count comes
+    number of invocations as one with every key set -- the count comes
     from the injected `ProcessRunner`'s own call log, not a hardcoded
     expected-count literal."""
 
@@ -430,7 +400,7 @@ def test_invocation_count_is_invariant_between_zero_and_all_fifteen_keys_set() -
     assert len(recorded_zero) == ceiling
     assert len(recorded_all) == ceiling
     assert len(recorded_zero) == len(recorded_all)
-    # Sanity: the "all fifteen" fixture actually resolved all fifteen.
+    # Sanity: the "all keys set" fixture actually resolved every key.
     assert len(result_all) == len(_NON_BOOLEAN_SAMPLE) + len(BOOLEAN_KEYS)
 
 
@@ -504,7 +474,7 @@ def test_mapping_table_is_bidirectionally_complete_against_config_fields() -> No
     }
 
     assert mapped_pairs == config_pairs
-    assert len(MAPPING) == 15
+    assert len(MAPPING) == 16
 
 
 def test_local_and_global_scope_values_both_survive_assembly(tmp_path: Path) -> None:

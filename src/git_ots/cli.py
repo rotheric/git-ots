@@ -371,7 +371,7 @@ def _format_config_value(section: str, value: object) -> str:
 def _print_config_report(config, origins: dict[str, str]) -> None:
     """Print the effective configuration, one row per ``ots.*`` key.
 
-    Every one of :data:`MAPPING`'s fifteen rows is shown, in its
+    Every one of :data:`MAPPING`'s rows is shown, in its
     declaration order, whether or not an operator set it -- an unconfigured
     key's row (e.g. ``ots.signing  inherit  default``) is as much part of
     "the effective configuration" as a configured one, and showing every
@@ -719,10 +719,28 @@ def _upgrade_command(*, cwd: Path, dry_run: bool, verbose: bool) -> int:
     pending = counts[UpgradeState.STILL_PENDING] + counts[UpgradeState.WOULD_UPGRADE]
     complete = counts[UpgradeState.ALREADY_COMPLETE]
     print(f"{upgraded} upgraded, {pending} still pending, {complete} already complete.")
-    if report.commit_id is not None:
+    if report.commit_id is not None and report.squashed:
+        print(
+            "Folded upgraded proofs into the previous upgrade commit, now "
+            f"{report.commit_id[:12]}."
+        )
+    elif report.commit_id is not None:
         print(f"Committed upgraded proofs as {report.commit_id[:12]}.")
     elif upgraded:
         print("Upgraded proofs are uncommitted in the worktree.")
+    elif dry_run and counts[UpgradeState.WOULD_UPGRADE] and config.proof.commit:
+        if report.would_squash_into is not None:
+            print(
+                "Would fold upgraded proofs into the upgrade commit at HEAD, "
+                f"{report.would_squash_into[:12]}."
+            )
+        elif config.proof.squash_upgrade_commits:
+            print(
+                "Would commit upgraded proofs as a new commit; the commit at "
+                "HEAD is not a squash target."
+            )
+        else:
+            print("Would commit upgraded proofs as a new commit.")
 
     if counts[UpgradeState.SKIPPED]:
         return 5
@@ -987,7 +1005,11 @@ def main(
             "Asks every calendar that has not yet delivered -- including the ones\n"
             "the OpenTimestamps client stops asking once another calendar has\n"
             "anchored the proof -- and commits what came back. 'git-ots run' never\n"
-            "upgrades.\n"
+            "upgrades. With 'ots.squashUpgradeCommits' set, a repeated upgrade\n"
+            "amends the previous upgrade commit instead of stacking a new one on\n"
+            "top -- unless that commit is already published, is signed where the\n"
+            "fold would not be, or is not exactly one this tool wrote. A dry run\n"
+            "says which it would be.\n"
             "\n"
             "Needs the OpenTimestamps client on PATH and network access. Exits 5 if\n"
             "a proof had to be skipped."

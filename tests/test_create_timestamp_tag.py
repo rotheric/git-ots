@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from git_ots import __version__
 from git_ots.git import InvalidRepositoryStateError, create_timestamp_tag
 
 
@@ -82,7 +83,7 @@ def test_create_timestamp_tag_annotation_fields_are_correct(tmp_path: Path) -> N
 
     contents = _git(["tag", "-l", "--format=%(contents)", tag_name], cwd=repo)
     assert "git-ots schema: 2" in contents
-    assert "producer: git-ots 0.0.1" in contents
+    assert f"producer: git-ots {__version__}" in contents
     assert f"source: {a_id}" in contents
     assert "submitted-at: 2026-08-08T22:00:03Z" in contents
     assert f"proof: .opentimestamps/{a_id}.ots" in contents

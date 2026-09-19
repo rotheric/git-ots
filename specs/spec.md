@@ -228,6 +228,7 @@ namespace.
 | `ots.signing` | `inherit` \| `required` | `inherit` | Signing of the objects this tool creates |
 | `ots.proofCommit` | boolean | `true` | Commit proof artifacts (§13) |
 | `ots.proofDirectory` | path | `.opentimestamps` | Where proofs and manifests are stored (§4) |
+| `ots.squashUpgradeCommits` | boolean | `false` | Fold a new upgrade commit into the previous one (§28.6.2) |
 | `ots.command` | string | `ots` | The OpenTimestamps client to invoke |
 | `ots.otsTimeout` | duration | `120s` | Bound on one `ots` submission or upgrade |
 | `ots.gitTimeout` | duration | `60s` | Bound on one `git` invocation |
@@ -1359,6 +1360,9 @@ and SHALL therefore not count as a meaningful source change.
 
 Updating an existing `.ots` file SHALL not change the original source tag.
 
+Consecutive upgrade commits MAY be collapsed into one, at the operator's
+explicit request and under the conditions of §28.6.2.
+
 ---
 
 # 28. CLI
@@ -1615,8 +1619,11 @@ An upgrade command SHALL complete stored proofs that carry only calendar
 attestations:
 
 ```text
-git ots upgrade
+git ots upgrade [--dry-run]
 ```
+
+With `--dry-run` the command SHALL contact no calendar and write nothing, and
+SHALL report for each proof what a real pass would attempt.
 
 The command SHALL select every proof in the configured proof directory that
 parses, binds to the source commit named by its manifest, and contains no
@@ -1651,6 +1658,30 @@ sources SHALL be named with an `OpenTimestamps-Upgraded` trailer rather than
 `OpenTimestamps-Source`, because the source trailer denotes the claim to have
 stamped a commit and an earlier proof commit already carries it.
 
+The message SHALL be, for a single source:
+
+```text
+Upgrade OpenTimestamps proof for 0123456789ab
+
+OpenTimestamps-Generated: true
+OpenTimestamps-Upgraded: 0123456789abcdef0123456789abcdef01234567
+```
+
+and for several, with the count in the subject:
+
+```text
+Upgrade 3 OpenTimestamps proofs
+
+OpenTimestamps-Generated: true
+OpenTimestamps-Upgraded: <sha-1>
+OpenTimestamps-Upgraded: <sha-2>
+OpenTimestamps-Upgraded: <sha-3>
+```
+
+Unlike §13's, this message shape is normative rather than recommended:
+§28.6.2 reads it back to decide whether a commit may be amended, so a
+different spelling is a commit this tool declines to treat as its own.
+
 ### 28.6.1 Collecting attestations the client will not
 
 The OpenTimestamps client treats a timestamp as complete at its first Bitcoin
@@ -1678,6 +1709,121 @@ proof SHALL be left untouched.
 `git ots run` SHALL NOT perform upgrades or collection. Both require network
 access and rewrite existing artifacts, so they remain explicitly
 operator-invoked.
+
+### 28.6.2 Squashing consecutive upgrade commits
+
+A proof rarely gains every attestation it will ever have in one pass, so a
+repository upgraded on a schedule accumulates a run of upgrade commits that
+each restate the same claim about the same files. When
+
+```text
+git config ots.squashUpgradeCommits true
+```
+
+is set, an upgrade that would create a commit SHALL instead amend the commit
+at `HEAD`, provided every one of the following holds:
+
+* `HEAD` carries at least one `OpenTimestamps-Upgraded` trailer;
+* `HEAD`'s message is, ignoring trailing newlines, exactly the message §28.6
+  prescribes for those sources;
+* `HEAD` changes no path outside the configured proof directory;
+* `HEAD` has exactly one parent;
+* amending would not leave the commit unsigned where it is currently signed —
+  that is, `HEAD` carries no signature, or `ots.signing` is `required`, or
+  ambient `commit.gpgsign` is set, so the replacement is signed too;
+* `HEAD` is not reachable from any `refs/remotes/*` ref.
+
+If any does not hold, the command SHALL create an ordinary upgrade commit as
+§28.6 describes. The signature and reachability conditions SHALL additionally
+be reported on stderr, because those are the cases in which squashing was
+requested, the commit was otherwise eligible, and it did not happen.
+
+Reachability SHALL be evaluated against the local repository's own
+remote-tracking refs; the tool SHALL NOT contact a remote to decide it. This
+condition SHALL be understood as detecting publication, not as establishing
+its absence: a commit pushed from another clone, pushed to a URL that leaves
+no tracking ref, or pushed since the last fetch is not distinguishable from an
+unpublished one by any local query, and SHALL therefore be amended. The
+documentation SHALL say so rather than promise that pushed commits are
+protected. A local tag or another local branch pointing at `HEAD` SHALL NOT be
+a decline: amending moves only the current branch and those refs keep the
+previous object.
+
+The eligibility conditions SHALL be evaluated against a single resolved object
+ID. Immediately before each amendment attempt, including retries after lock
+contention, the command SHALL check that `HEAD` still names that ID.
+`git commit --amend` rewrites whatever `HEAD` names at the moment it runs, and
+the repository lock of §24 excludes only other invocations of this tool, so a
+concurrent ordinary commit can move the branch in between. If `HEAD` has
+moved, the command SHALL fail with the inconsistent-repository-state exit code
+rather than amend the commit that arrived; the upgraded proofs are already
+written and staged, so a later invocation records them -- once the operator
+has cleared the worktree, where `ots.requireCleanWorktree` is set.
+
+This check is not atomic with Git's amendment: a concurrent writer can still
+move `HEAD` between the check and Git reading it. Documentation SHALL state
+that operators must avoid concurrent repository mutations while squashing.
+
+The message condition is deliberately stricter than the trailer-only
+classification of §13. The generated trailer identifies a commit as metadata;
+it does not establish that this tool wrote the commit as it now stands. A
+`git rebase -i` that squashes an upgrade commit into an ordinary one
+concatenates the two messages, so the result carries both trailers alongside
+the operator's own subject and body. Amending it would preserve its tree but
+replace its message, destroying the only copy of that text. Requiring the
+whole message subsumes the two trailer conditions an upgrade commit's message
+always satisfies — `OpenTimestamps-Generated: true` present and
+`OpenTimestamps-Source` absent — so a proof commit is likewise never a target.
+A `commit-msg` hook or `commit.cleanup` setting that alters the message as it
+is written makes every upgrade commit in that repository ineligible. That is a
+consequence of the condition, not an exception to it: the tool SHALL NOT
+loosen the comparison to accommodate it, and SHALL report the mismatch at a
+diagnostic level below warning, so that a repository in which the setting can
+never take effect is explicable on request without every foreign commit at
+`HEAD` producing a warning.
+
+The condition establishes shape, not provenance, and SHALL NOT be described as
+proof of authorship. Git records no durable marker that this tool created a
+given object, so a commit constructed by other means to be byte-identical,
+touching only the proof directory, with one parent and no known publication,
+is a valid target and SHALL be treated as one. The remaining conditions exist
+to keep the set of commits with that shape to ones where amending loses
+nothing.
+
+Squashing SHALL be understood to discard the per-refresh chronology. The union
+of `OpenTimestamps-Upgraded` trailers preserves *which* sources were
+refreshed, and the proof files themselves are unaffected — a Bitcoin
+attestation carries its own block, and no commit date has ever been part of
+what a timestamp asserts (§9, §35). What the fold removes from reachable
+history is the superseded commit objects and the committer timestamp of each
+individual refresh: afterwards the repository cannot say when it obtained a
+given attestation. The documentation SHALL state this, because it is the cost
+an operator is accepting and it is not recoverable once the commits are
+unreachable.
+
+The amended commit's message SHALL name the union of the
+`OpenTimestamps-Upgraded` trailers of the commit being amended and the sources
+upgraded by this pass, in that order and without duplicates, and its subject
+SHALL be the one §28.6 gives for that number of sources — a squashed commit is
+indistinguishable from the single commit the same upgrades would have produced
+had they arrived together, which is also what lets the next squash recognize
+it. Only the proof paths this pass rewrote SHALL be updated; every other path
+in the amended commit's tree SHALL be carried over unchanged, as SHALL its
+author date.
+
+`git ots upgrade --dry-run` SHALL make the same eligibility decision, without
+writing anything, whenever it reports that a proof would be upgraded, and SHALL say
+whether those proofs would be folded into the commit at `HEAD` or recorded in
+a new commit.
+
+The default SHALL be `false`. Amending is a history rewrite, and the
+specification does not make that choice on an operator's behalf. Nothing this
+tool creates depends on an upgrade commit's identity: an upgrade commit is
+never a meaningful commit (§14), never carries a timestamp tag (§12), and is
+never a proof-commit baseline (§17), because it makes no `OpenTimestamps-Source`
+claim. A proof commit SHALL never be amended for the same reason it is
+excluded above: it dates a submission and is the recovery artifact §22.3 reads
+back, whereas an upgrade commit only records that a file was refreshed.
 
 ## 28.7 Configuration and proof discovery
 
@@ -2131,8 +2277,8 @@ git config ots.sourceRef '@{upstream}'
 Only the settings that depart from the defaults of §5 need to be named. The
 example above sets four; `ots.everyCommit`, `ots.initialHistory`,
 `ots.fetchBeforeRun`, `ots.tagPrefix`, `ots.requireCleanWorktree`,
-`ots.signing`, `ots.proofCommit` and `ots.command` are all left at their
-defaults and are therefore absent — the configuration is the diff from the
+`ots.signing`, `ots.proofCommit`, `ots.squashUpgradeCommits` and
+`ots.command` are all left at their defaults and are therefore absent — the configuration is the diff from the
 defaults, not a transcription of them.
 
 Scope is a real choice here, not boilerplate. `--local` (the default above)

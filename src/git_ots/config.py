@@ -163,10 +163,35 @@ class ProofConfig:
     the pathspecs handed to Git. :func:`validate_proof_directory` enforces
     that, along with the containment rules that keep a configured value from
     naming anything outside the worktree.
+
+    ``squash_upgrade_commits`` folds a new upgrade commit into the one at
+    ``HEAD`` when that commit is itself an upgrade commit this tool wrote,
+    instead of stacking a second one on top. A scheduled ``git-ots upgrade``
+    produces a commit every time a calendar has something new, so a proof
+    that gains attestations over several days leaves a run of commits that
+    all say the same thing about the same files; squashing keeps that to one.
+
+    It defaults to ``False`` because amending is a history rewrite, and the
+    tool does not get to decide on the operator's behalf that rewriting is
+    acceptable here. Nothing this tool creates depends on the identity of an
+    upgrade commit -- an upgrade commit is never itself timestamped (§14) and
+    never carries a tag -- so the exposure is entirely to whoever else has
+    seen it. That exposure is bounded rather than trusted: squashing is
+    declined, and an ordinary commit made instead, when ``HEAD`` is already
+    reachable from a remote-tracking ref (see
+    :func:`git_ots.git.find_squashable_upgrade_commit`).
+
+    Only upgrade commits squash, and only into upgrade commits. A proof
+    commit records a submission that happened at a particular time and is the
+    recovery artifact §22.3 reads; an upgrade commit records that a proof file
+    was refreshed, which is bookkeeping about an event the proof itself
+    already dates. Folding the second kind together loses nothing the first
+    kind would not.
     """
 
     directory: str = PROOF_DIRECTORY
     commit: bool = True
+    squash_upgrade_commits: bool = False
 
 
 @dataclass(frozen=True)
