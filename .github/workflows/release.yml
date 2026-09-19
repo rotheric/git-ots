@@ -2,14 +2,89 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
+    paths: ["src/git_ots/__init__.py"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing version tag to recover (for example v0.0.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      needed: ${{ steps.release.outputs.needed }}
+      target: ${{ steps.release.outputs.target }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect version bump or validate recovery tag
+        id: release
+        run: python3 .github/scripts/release_target.py
+
+  timestamp:
+    needs: select
+    if: needs.select.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.target }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.29"
+          python-version: "3.12"
+      - name: Check release source before creating tags
+        run: |
+          uv run --frozen ruff check src tests
+          uv run --frozen ruff format --check src tests
+          uv run --frozen pytest
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PUSH_TOKEN }}
+      - name: Store timestamp and create version tag
+        env:
+          RELEASE_TARGET: ${{ needs.select.outputs.target }}
+          RELEASE_TAG: ${{ needs.select.outputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge-base --is-ancestor "$RELEASE_TARGET" HEAD
+          git config ots.sourceRef "$RELEASE_TARGET"
+          git config ots.everyCommit true
+          git config ots.fetchBeforeRun false
+          uv run --frozen --with opentimestamps-client==0.7.2 git-ots run
+          git cat-file -e "HEAD:.opentimestamps/$RELEASE_TARGET.ots"
+          git cat-file -e "HEAD:.opentimestamps/$RELEASE_TARGET.json"
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$RELEASE_TARGET"
+          else
+            git tag -a "$RELEASE_TAG" "$RELEASE_TARGET" -m "Release $RELEASE_TAG"
+          fi
+          # Atomic, fast-forward-only: a concurrent master push fails safely.
+          # Explicit tag ref also publishes an existing tag during recovery.
+          git push --atomic --follow-tags origin HEAD:refs/heads/master "refs/tags/$RELEASE_TAG"
+
   build:
+    needs: [select, timestamp]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -18,6 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.select.outputs.target }}
           fetch-depth: 0
 
       - name: Install uv
@@ -27,7 +103,7 @@ jobs:
 
       - name: Verify tag, version, and stored timestamp proof
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.select.outputs.tag }}
         run: |
           test "v$(uv run --frozen git-ots --version)" = "$RELEASE_TAG"
           target="$(git rev-list -n 1 "$RELEASE_TAG")"
@@ -59,7 +135,7 @@ jobs:
           path: SHA256SUMS
 
   github-release:
-    needs: build
+    needs: [select, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -72,11 +148,14 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${{ github.ref_name }}" release-assets/*
-          --repo "${{ github.repository }}"
-          --verify-tag
-          --generate-notes
+          RELEASE_TAG: ${{ needs.select.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; preserving its assets."
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes
+          fi
 
   pypi:
     needs: build
@@ -93,3 +172,5 @@ jobs:
           path: dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
