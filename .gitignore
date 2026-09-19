@@ -54,3 +54,4 @@ opencode.json
 .DS_Store
 Thumbs.db
 mutants/
+.envrc
