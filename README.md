@@ -131,6 +131,8 @@ targets, troubleshooting, and contributor setup.
   targets, and troubleshooting.
 - [Configuration and scheduling](docs/configuration.md) — every `ots.*` key, policy behavior, source
   selection, cron, systemd, and CI scheduling.
+- [GitHub Actions examples](docs/github-actions.md) — automatic release timestamps, scheduled
+  proof upgrades, token setup, and preventing workflow cascades.
 - [Proof lifecycle and verification](docs/proof-lifecycle.md) — timestamp payloads, proof storage,
   tags, upgrading, validation, and Bitcoin verification.
 - [Operations and recovery](docs/operations.md) — safety, signing, concurrency, recovery, exit

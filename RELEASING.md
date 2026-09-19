@@ -20,7 +20,9 @@ change must be called out explicitly in `CHANGELOG.md`.
 ## One-time setup
 
 Create the repository Actions secret `RELEASE_PUSH_TOKEN` with a fine-grained
-PAT restricted to `rotheric/git-ots`, with Contents read/write access. Its owner
+PAT restricted to `rotheric/git-ots`, with Contents and Workflows read/write
+access. Workflow permission is also needed when pushing tags whose history
+contains workflow changes. Its owner
 must be allowed to bypass the `Protect master` ruleset: the generated proof
 commit is pushed directly. The current ruleset already permits repository
 administrators to bypass it. The built-in Actions token is used for other jobs.
@@ -54,4 +56,6 @@ in `release_tag`. This runs the new workflow against the tagged source commit
 and stores its proof on current `master`. Rerunning an old workflow run uses
 its old workflow definition, so use this manual entry point after migrating.
 Initial calendar proofs satisfy the release check; Bitcoin confirmation and
-proof upgrading happen later.
+proof upgrading happen later in the hourly `Upgrade timestamp proofs` workflow.
+See [GitHub Actions examples](docs/github-actions.md) for both workflows,
+shared credentials, upgrade behavior, and adapting them to another repository.

@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DETAIL_DOCUMENTS = (
     "docs/installation.md",
     "docs/configuration.md",
+    "docs/github-actions.md",
     "docs/proof-lifecycle.md",
     "docs/operations.md",
     "docs/what-a-proof-proves.md",

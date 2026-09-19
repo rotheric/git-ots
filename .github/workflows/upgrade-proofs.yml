@@ -1,0 +1,46 @@
+name: Upgrade timestamp proofs
+
+on:
+  schedule:
+    - cron: "43 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep separate from release: a scheduled run must not replace a pending release.
+concurrency:
+  group: upgrade-proofs
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PUSH_TOKEN }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.29"
+          python-version: "3.12"
+      - name: Upgrade and push changed proofs
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config ots.proofCommit true
+          git config ots.squashUpgradeCommits false
+          before="$(git rev-parse HEAD)"
+          uv run --frozen --with opentimestamps-client==0.7.2 git ots upgrade
+          if test "$(git rev-parse HEAD)" = "$before"; then
+            echo "No proof updates to push."
+            exit 0
+          fi
+          # A concurrent release/user push rejects this fast-forward-only push.
+          # The next run starts from current master and asks the calendars again.
+          git push origin HEAD:refs/heads/master

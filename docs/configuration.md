@@ -385,6 +385,10 @@ steps:
     run: git ots run
 ```
 
+For complete examples with checkout, credentials, pushing, and cascade prevention,
+see [GitHub Actions examples](github-actions.md). This repository timestamps release
+commits and separately upgrades stored proofs every hour.
+
 ## Source ref and upstream behavior
 
 The default `ots.sourceRef` is `HEAD`, so the eligible state is the current branch
